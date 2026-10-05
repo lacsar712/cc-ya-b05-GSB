@@ -25,4 +25,15 @@ CREATE TABLE IF NOT EXISTS yaw_logs (
     created_at timestamptz NOT NULL,
     processed_at timestamptz
 );
+
+CREATE TABLE IF NOT EXISTS shift_briefings (
+    id serial PRIMARY KEY,
+    created_by text NOT NULL,
+    created_at timestamptz NOT NULL,
+    pending_count integer NOT NULL,
+    ok_count integer NOT NULL,
+    over_count integer NOT NULL,
+    recent_done jsonb NOT NULL,
+    body text NOT NULL
+);
 """

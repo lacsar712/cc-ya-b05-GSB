@@ -19,6 +19,27 @@ type Session = {
   role: string;
 };
 
+type RecentDone = {
+  id: number;
+  turbine_code: string;
+  yaw_err_deg: number;
+  verdict: string;
+  reason: string;
+  created_by: string;
+  processed_at: string;
+};
+
+type Briefing = {
+  id: number;
+  created_by: string;
+  created_at: string;
+  pending_count: number;
+  ok_count: number;
+  over_count: number;
+  recent_done: RecentDone[];
+  body: string;
+};
+
 @customElement("yaw-align-app")
 export class YawAlignApp extends LitElement {
   static styles = css`
@@ -121,10 +142,88 @@ export class YawAlignApp extends LitElement {
       flex-wrap: wrap;
       align-items: center;
     }
+    nav.tabs {
+      display: flex;
+      gap: 0.25rem;
+      margin-bottom: 1rem;
+      border-bottom: 1px solid #334155;
+    }
+    nav.tabs button {
+      background: transparent;
+      color: #94a3b8;
+      border-radius: 6px 6px 0 0;
+      border: 1px solid transparent;
+      border-bottom: none;
+      font-weight: 500;
+    }
+    nav.tabs button.active {
+      background: #1e293b;
+      color: #38bdf8;
+      border-color: #334155;
+    }
+    .briefing-layout {
+      display: grid;
+      grid-template-columns: 260px 1fr;
+      gap: 1rem;
+    }
+    @media (max-width: 640px) {
+      .briefing-layout {
+        grid-template-columns: 1fr;
+      }
+    }
+    ul.briefing-list {
+      list-style: none;
+      margin: 0;
+      padding: 0;
+    }
+    ul.briefing-list li {
+      padding: 0.5rem 0.6rem;
+      border: 1px solid #334155;
+      border-radius: 6px;
+      margin-bottom: 0.5rem;
+      cursor: pointer;
+      background: #0f172a;
+    }
+    ul.briefing-list li.active {
+      border-color: #38bdf8;
+    }
+    ul.briefing-list li .meta {
+      font-size: 0.75rem;
+      color: #94a3b8;
+      margin-top: 0.15rem;
+    }
+    .counts {
+      display: flex;
+      gap: 0.5rem;
+      margin-top: 0.25rem;
+    }
+    .counts span {
+      font-size: 0.72rem;
+      padding: 0.05rem 0.4rem;
+      border-radius: 4px;
+      background: #1e293b;
+    }
+    pre.briefing-body {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: inherit;
+      font-size: 0.9rem;
+      line-height: 1.6;
+      margin: 0.5rem 0 0;
+      color: #e2e8f0;
+    }
+    .muted {
+      color: #94a3b8;
+    }
   `;
 
   @state() private session: Session | null = null;
   @state() private logs: LogRow[] = [];
+  @state() private tab: "logs" | "briefings" = "logs";
+  @state() private briefings: Briefing[] = [];
+  @state() private selectedBriefing: Briefing | null = null;
+  @state() private briefingLoading = false;
+  @state() private briefingError = "";
   @state() private loginUser = "technician";
   @state() private loginPass = "tech123456";
   @state() private turbineCode = "";
@@ -199,6 +298,10 @@ export class YawAlignApp extends LitElement {
         role: data.role,
       };
       localStorage.setItem("yaw_session", JSON.stringify(this.session));
+      this.tab = "logs";
+      this.briefings = [];
+      this.selectedBriefing = null;
+      this.briefingError = "";
       await this.refreshLogs();
       this._pollTimer = window.setInterval(() => void this.refreshLogs(), 2000);
     } catch {
@@ -212,6 +315,10 @@ export class YawAlignApp extends LitElement {
     if (this._pollTimer) clearInterval(this._pollTimer);
     this.session = null;
     this.logs = [];
+    this.tab = "logs";
+    this.briefings = [];
+    this.selectedBriefing = null;
+    this.briefingError = "";
     localStorage.removeItem("yaw_session");
   }
 
@@ -256,6 +363,90 @@ export class YawAlignApp extends LitElement {
     return "";
   }
 
+  private fmtTime(iso: string): string {
+    const d = new Date(iso);
+    return Number.isNaN(d.getTime())
+      ? iso
+      : d.toLocaleString("zh-CN", { hour12: false });
+  }
+
+  private async switchTab(tab: "logs" | "briefings") {
+    this.tab = tab;
+    if (tab === "briefings") {
+      await this.refreshBriefings();
+    }
+  }
+
+  private async refreshBriefings() {
+    if (!this.session) return;
+    try {
+      const res = await fetch("/api/briefings", {
+        headers: this.authHeaders(),
+      });
+      if (res.status === 401) {
+        this.logout();
+        return;
+      }
+      if (!res.ok) return;
+      const rows = (await res.json()) as Briefing[];
+      this.briefings = rows;
+      // 历史列表行与详情同源（均为落库冻结正文）；选中项按 id 同步，不做重算。
+      if (this.selectedBriefing) {
+        const fresh = rows.find((b) => b.id === this.selectedBriefing!.id);
+        if (fresh) this.selectedBriefing = fresh;
+      }
+    } catch {
+      /* ignore transient network errors */
+    }
+  }
+
+  private async selectBriefing(id: number) {
+    // 打开旧简报：从后端取生成时落库的冻结行，不据当前列表重算。
+    try {
+      const res = await fetch(`/api/briefings/${id}`, {
+        headers: this.authHeaders(),
+      });
+      if (res.status === 401) {
+        this.logout();
+        return;
+      }
+      if (!res.ok) {
+        this.briefingError = "读取简报失败";
+        return;
+      }
+      this.selectedBriefing = (await res.json()) as Briefing;
+    } catch {
+      this.briefingError = "读取简报时网络异常";
+    }
+  }
+
+  private async generateBriefing() {
+    this.briefingError = "";
+    this.briefingLoading = true;
+    try {
+      const res = await fetch("/api/briefings", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...this.authHeaders(),
+        },
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        this.briefingError = data.detail || "生成简报失败";
+        return;
+      }
+      const briefing = data as Briefing;
+      // 直接展示后端落库后返回的冻结行，而不是用当前列表数据临时拼预览。
+      this.briefings = [briefing, ...this.briefings];
+      this.selectedBriefing = briefing;
+    } catch {
+      this.briefingError = "生成简报时网络异常";
+    } finally {
+      this.briefingLoading = false;
+    }
+  }
+
   render() {
     if (!this.session) {
       return html`
@@ -296,6 +487,24 @@ export class YawAlignApp extends LitElement {
         </div>
       </section>
 
+      <nav class="tabs">
+        <button
+          class=${this.tab === "logs" ? "active" : ""}
+          @click=${() => this.switchTab("logs")}
+        >
+          对中记录
+        </button>
+        <button
+          class=${this.tab === "briefings" ? "active" : ""}
+          @click=${() => this.switchTab("briefings")}
+        >
+          交班简报
+        </button>
+      </nav>
+
+      ${this.tab === "briefings"
+        ? this.renderBriefings()
+        : html`
       ${this.isWriter
         ? html`
             <section>
@@ -359,6 +568,82 @@ export class YawAlignApp extends LitElement {
             )}
           </tbody>
         </table>
+      </section>
+      `}
+    `;
+  }
+
+  private renderBriefings() {
+    return html`
+      <section>
+        <div class="row-actions">
+          ${this.isWriter
+            ? html`
+                <button
+                  ?disabled=${this.briefingLoading}
+                  @click=${this.generateBriefing}
+                >
+                  生成交班简报
+                </button>
+              `
+            : html`<span class="muted">只读账号可查看历史简报，不能生成。</span>`}
+          <button class="secondary" @click=${this.refreshBriefings}>
+            刷新历史
+          </button>
+        </div>
+        ${this.briefingError
+          ? html`<p class="err">${this.briefingError}</p>`
+          : null}
+      </section>
+
+      <section>
+        <div class="briefing-layout">
+          <div>
+            <h2 style="margin-top:0;font-size:1rem;">历史简报</h2>
+            ${this.briefings.length === 0
+              ? html`<p class="muted">暂无简报</p>`
+              : html`
+                  <ul class="briefing-list">
+                    ${this.briefings.map(
+                      (b) => html`
+                        <li
+                          class=${
+                            this.selectedBriefing?.id === b.id ? "active" : ""
+                          }
+                          @click=${() => this.selectBriefing(b.id)}
+                        >
+                          <div>#${b.id} 交班简报</div>
+                          <div class="meta">${this.fmtTime(b.created_at)}</div>
+                          <div class="meta">生成人：${b.created_by}</div>
+                          <div class="counts">
+                            <span>待处理 ${b.pending_count}</span>
+                            <span>合格 ${b.ok_count}</span>
+                            <span>超差 ${b.over_count}</span>
+                          </div>
+                        </li>
+                      `
+                    )}
+                  </ul>
+                `}
+          </div>
+          <div>
+            <h2 style="margin-top:0;font-size:1rem;">正文预览</h2>
+            ${
+              this.selectedBriefing
+                ? html`
+                    <p class="meta muted" style="margin:0 0 0.25rem;font-size:0.8rem;">
+                      #${this.selectedBriefing.id} ·
+                      ${this.fmtTime(this.selectedBriefing.created_at)} ·
+                      ${this.selectedBriefing.created_by} 生成，内容已冻结
+                    </p>
+                    <pre class="briefing-body">${
+                      this.selectedBriefing.body
+                    }</pre>
+                  `
+                : html`<p class="muted">点击左侧历史条目查看冻结正文。</p>`
+            }
+          </div>
+        </div>
       </section>
     `;
   }
